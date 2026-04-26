@@ -94,7 +94,7 @@ def generate_voiceover(script_text: str) -> Path:
     response = requests.post(
         f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
         headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
+            "Authorization": f"Bearer {ELEVENLABS_API_KEY}",
             "Content-Type": "application/json"
         },
         json={
