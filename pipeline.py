@@ -6,31 +6,27 @@ Length: 1-2 min (Shorts)
 
 Flow:
 1. Groq API → generate trending topic + script
-2. ElevenLabs API → convert script to voiceover MP3
+2. gTTS (Google TTS, 100% free, no API key needed) → voiceover MP3
 3. Pexels API → download relevant stock video clips
 4. FFmpeg → assemble video (clips + audio + subtitles + Shorts format)
 5. YouTube Data API → upload as a Short
 """
 
 import os
-import sys
 import json
 import random
 import requests
 import subprocess
-import textwrap
 from datetime import datetime
 from pathlib import Path
+from gtts import gTTS
 
-# ── Config (set via environment variables / GitHub Secrets) ──────────────────
-GROQ_API_KEY        = os.environ["GROQ_API_KEY"]
-ELEVENLABS_API_KEY  = os.environ["ELEVENLABS_API_KEY"]
-PEXELS_API_KEY      = os.environ["PEXELS_API_KEY"]
-YOUTUBE_CLIENT_ID   = os.environ["YOUTUBE_CLIENT_ID"]
+# ── Config (set via GitHub Secrets) ─────────────────────────────────────────
+GROQ_API_KEY          = os.environ["GROQ_API_KEY"]
+PEXELS_API_KEY        = os.environ["PEXELS_API_KEY"]
+YOUTUBE_CLIENT_ID     = os.environ["YOUTUBE_CLIENT_ID"]
 YOUTUBE_CLIENT_SECRET = os.environ["YOUTUBE_CLIENT_SECRET"]
 YOUTUBE_REFRESH_TOKEN = os.environ["YOUTUBE_REFRESH_TOKEN"]
-
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")  # default: Bella
 
 WORK_DIR = Path("output")
 WORK_DIR.mkdir(exist_ok=True)
@@ -85,32 +81,15 @@ Respond ONLY with valid JSON in this exact format:
     return data
 
 
-# ── Step 2: Text-to-Speech via ElevenLabs ───────────────────────────────────
+# ── Step 2: Text-to-Speech via gTTS (free, no API key) ───────────────────────
 def generate_voiceover(script_text: str) -> Path:
-    print("🎙️  Generating voiceover with ElevenLabs...")
+    print("🎙️  Generating voiceover with gTTS (Google TTS)...")
 
     audio_path = WORK_DIR / "voiceover.mp3"
 
-    response = requests.post(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
-        headers={
-            "Authorization": f"Bearer {ELEVENLABS_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "text": script_text,
-            "model_id": "eleven_monolingual_v1",
-            "voice_settings": {
-                "stability": 0.4,
-                "similarity_boost": 0.85,
-                "style": 0.3,
-                "use_speaker_boost": True
-            }
-        }
-    )
-    response.raise_for_status()
+    tts = gTTS(text=script_text, lang="en", slow=False)
+    tts.save(str(audio_path))
 
-    audio_path.write_bytes(response.content)
     print(f"✅ Voiceover saved ({audio_path.stat().st_size // 1024}KB)")
     return audio_path
 
@@ -130,7 +109,6 @@ def get_stock_video(keyword: str) -> Path:
     videos = resp.json().get("videos", [])
 
     if not videos:
-        # Fallback keyword
         print(f"⚠️  No results for '{keyword}', trying 'technology'...")
         resp = requests.get(
             "https://api.pexels.com/videos/search",
@@ -140,11 +118,9 @@ def get_stock_video(keyword: str) -> Path:
         resp.raise_for_status()
         videos = resp.json().get("videos", [])
 
-    # Pick a random video from results and get HD portrait file
     video = random.choice(videos[:5])
     video_files = video["video_files"]
 
-    # Prefer portrait (height > width), fallback to any
     portrait_files = [f for f in video_files if f.get("height", 0) > f.get("width", 0)]
     chosen = portrait_files[0] if portrait_files else video_files[0]
 
@@ -175,14 +151,12 @@ def assemble_video(stock_path: Path, audio_path: Path, script_text: str, title: 
     output_path = WORK_DIR / "final_short.mp4"
     audio_duration = get_duration(audio_path)
 
-    # Build subtitle lines (word-wrap at ~35 chars, show 3 lines at a time)
     words = script_text.split()
     chunks = []
-    chunk_size = 8  # words per subtitle chunk
+    chunk_size = 8
     for i in range(0, len(words), chunk_size):
         chunks.append(" ".join(words[i:i+chunk_size]))
 
-    # Write SRT subtitle file
     srt_path = WORK_DIR / "subtitles.srt"
     time_per_chunk = audio_duration / max(len(chunks), 1)
     with open(srt_path, "w") as f:
@@ -193,16 +167,10 @@ def assemble_video(stock_path: Path, audio_path: Path, script_text: str, title: 
             f.write(f"{_fmt_time(start)} --> {_fmt_time(end)}\n")
             f.write(f"{chunk}\n\n")
 
-    # FFmpeg command:
-    # - Loop stock video to match audio length
-    # - Scale to 1080x1920 (Shorts format)
-    # - Add slight darkening overlay for text readability
-    # - Burn in subtitles
-    # - Mix in audio
     cmd = [
         "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", str(stock_path),   # loop video
-        "-i", str(audio_path),                          # voiceover
+        "-stream_loop", "-1", "-i", str(stock_path),
+        "-i", str(audio_path),
         "-filter_complex",
         (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
@@ -258,7 +226,6 @@ def upload_to_youtube(video_path: Path, metadata: dict) -> str:
 
     access_token = get_youtube_access_token()
 
-    # Step A: Initialize resumable upload
     init_resp = requests.post(
         "https://www.googleapis.com/upload/youtube/v3/videos",
         params={"uploadType": "resumable", "part": "snippet,status"},
@@ -273,7 +240,7 @@ def upload_to_youtube(video_path: Path, metadata: dict) -> str:
                 "title": metadata["title"],
                 "description": metadata["description"],
                 "tags": metadata["tags"] + ["Shorts", "viral", "trending", "AI"],
-                "categoryId": "28"  # Science & Technology
+                "categoryId": "28"
             },
             "status": {
                 "privacyStatus": "public",
@@ -284,7 +251,6 @@ def upload_to_youtube(video_path: Path, metadata: dict) -> str:
     init_resp.raise_for_status()
     upload_url = init_resp.headers["Location"]
 
-    # Step B: Upload video bytes
     with open(video_path, "rb") as f:
         video_bytes = f.read()
 
@@ -308,19 +274,10 @@ def upload_to_youtube(video_path: Path, metadata: dict) -> str:
 def main():
     print("\n🚀 YouTube Shorts Automation Pipeline Starting...\n")
 
-    # 1. Generate script
     metadata = generate_script()
-
-    # 2. Voiceover
     audio_path = generate_voiceover(metadata["script"])
-
-    # 3. Stock footage
     stock_path = get_stock_video(metadata["search_keyword"])
-
-    # 4. Assemble
     video_path = assemble_video(stock_path, audio_path, metadata["script"], metadata["title"])
-
-    # 5. Upload
     video_id = upload_to_youtube(video_path, metadata)
 
     print(f"\n🎉 Done! Your Short is live: https://youtube.com/shorts/{video_id}\n")
